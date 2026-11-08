@@ -14,8 +14,8 @@
 <canvas id="c"></canvas>
 <script>
 // ===== ぽよんぽよんボール =====
-// ルール: ボールは自動でぽよんと跳ねる。左右にうごかして、ゼリーの床を登りながら ★ を集めよう。
-// 操作: 画面の左/右をタッチ(長押し)・ドラッグ、またはキーボード ← →
+// ボールは自動でぽよんと跳ねる。左右に動かしてゼリーの床を登り、★を集めよう。
+// 操作: 画面の左/右を押す(長押しで移動)。押した瞬間に空中でもう1回ぽよん(空中ジャンプ)。キーボードは ← → とスペース。
 const cv = document.getElementById('c'), ctx = cv.getContext('2d');
 const W = 400, H = 700; let scale = 1;
 function resize(){
@@ -27,180 +27,388 @@ function resize(){
 }
 addEventListener('resize', resize); resize();
 
-// --- 音 ---
+// ---------- 音 ----------
 let ac = null;
-function snd(f1, f2, dur, type='sine', vol=0.25){
+function snd(f1, f2, dur, type='sine', vol=0.25, delay=0){
   try{
     if(!ac) ac = new (window.AudioContext||window.webkitAudioContext)();
-    const o = ac.createOscillator(), g = ac.createGain(), t = ac.currentTime;
+    const o = ac.createOscillator(), g = ac.createGain(), t = ac.currentTime + delay;
     o.type = type; o.frequency.setValueAtTime(f1,t); o.frequency.exponentialRampToValueAtTime(f2,t+dur);
     g.gain.setValueAtTime(vol,t); g.gain.exponentialRampToValueAtTime(0.001,t+dur);
     o.connect(g).connect(ac.destination); o.start(t); o.stop(t+dur);
   }catch(e){}
 }
-const poyon = (big)=> big ? (snd(200,700,0.25), setTimeout(()=>snd(400,1000,0.2),90)) : snd(260,520,0.18);
-const kira = ()=>{ snd(900,1400,0.12,'triangle',0.2); setTimeout(()=>snd(1200,1800,0.15,'triangle',0.2),70); };
+const SE = {
+  poyon: ()=>snd(260,520,0.18),
+  big:   ()=>{ snd(200,700,0.25); snd(400,1000,0.2,'sine',0.25,0.09); },
+  air:   ()=>snd(400,800,0.12,'sine',0.2),
+  star:  (n)=>{ const b = 900 + n*80; snd(b,b*1.5,0.12,'triangle',0.2); snd(b*1.3,b*2,0.15,'triangle',0.2,0.07); },
+  item:  ()=>[523,659,784,1046].forEach((f,i)=>snd(f,f,0.12,'triangle',0.2,i*0.07)),
+  stomp: ()=>{ snd(150,60,0.15,'square',0.15); snd(500,1200,0.2,'sine',0.2,0.08); },
+  hurt:  ()=>snd(500,120,0.5,'sine',0.3),
+  crack: ()=>snd(300,80,0.15,'sawtooth',0.12),
+  stage: ()=>[523,659,784,659,784,1046].forEach((f,i)=>snd(f,f,0.14,'triangle',0.2,i*0.1)),
+};
 
-// --- 状態 ---
-const COLORS = ['#ff7eb6','#7ed6ff','#ffd36e','#9be38a','#c59bff'];
+// ---------- データ ----------
+const PLAT_COLORS = ['#ff7eb6','#7ed6ff','#ffd36e','#9be38a','#c59bff'];
 const BALLS = ['#ff5fa2','#4fb3ff','#ffb703','#3cc46a','#a066ff'];
-let state = 'title', ball, plats = [], stars = [], parts = [], camY = 0, score, best = +(localStorage.getItem('poyonBest')||0), lives, ballColor = 0, t = 0;
+const STAGES = [
+  {h:0,    name:'そら',     top:'#8fd3ff', bot:'#ffe9f3', cloud:'rgba(255,255,255,.75)'},
+  {h:500,  name:'ゆうやけ', top:'#ff9a5a', bot:'#ffe0b0', cloud:'rgba(255,230,210,.7)'},
+  {h:1200, name:'よぞら',   top:'#2b2d6e', bot:'#7a5fb0', cloud:'rgba(200,200,255,.25)'},
+  {h:2000, name:'うちゅう', top:'#0b0b24', bot:'#2a1650', cloud:'rgba(255,255,255,.08)'},
+  {h:3000, name:'ほしのくに', top:'#3d1060', bot:'#ff7eb6', cloud:'rgba(255,220,255,.3)'},
+];
+let state = 'title', ball, plats = [], stars = [], items = [], foes = [], parts = [], pops = [];
+let camY = 0, maxH = 0, bonus = 0, lives = 3, stage = 0, banner = 0, shake = 0;
+let combo = 0, comboT = 0, rocket = 0, magnet = 0, hurtT = 0, t = 0;
+let best = 0; try{ best = +(localStorage.getItem('poyonBest')||0); }catch(e){}
+let ballColor = 0; try{ ballColor = +(localStorage.getItem('poyonColor')||0) % BALLS.length; }catch(e){}
+const score = ()=> Math.floor(maxH) + bonus;
+const height = ()=> -camY / 10; // 1m = 10px
 
 function reset(){
-  ball = {x:W/2, y:H-140, vx:0, vy:-9, r:22, sq:1};
-  plats = []; stars = []; parts = [];
-  camY = 0; score = 0; lives = 3;
+  ball = {x:W/2, y:H-140, vx:0, vy:-9, r:22, sq:1, air:true, trail:[]};
+  plats = []; stars = []; items = []; foes = []; parts = []; pops = [];
+  camY = 0; maxH = 0; bonus = 0; lives = 3; stage = 0; banner = 120;
+  combo = 0; comboT = 0; rocket = 0; magnet = 0; hurtT = 0; shake = 0;
   plats.push({x:0, y:H-60, w:W, kind:'ground'});
   let y = H-60;
-  while(y > -H) { y -= 85 + Math.random()*35; addPlat(y); }
+  while(y > -H) { y -= gap(); addPlat(y); }
 }
+function gap(){ const h = Math.max(0, height()); return 80 + Math.random()*30 + Math.min(35, h/50); }
 function addPlat(y){
-  const lvl = Math.min(1, score/60);
-  const w = 95 - lvl*30 + Math.random()*20;
+  const h = Math.max(0, -y/10), lvl = Math.min(1, h/2000);
+  const w = 100 - lvl*35 + Math.random()*20;
   const r = Math.random();
-  const kind = r < 0.12 ? 'super' : (r < 0.12 + lvl*0.25 ? 'move' : 'jelly');
-  const p = {x: Math.random()*(W-w), y, w, kind, c: COLORS[(Math.random()*COLORS.length)|0], vx: kind==='move' ? (1+lvl)*(Math.random()<.5?-1:1) : 0, wob:0};
+  let kind = 'jelly';
+  if(r < 0.10) kind = 'super';
+  else if(h > 200 && r < 0.10 + lvl*0.25) kind = 'move';
+  else if(h > 400 && r < 0.10 + lvl*0.25 + 0.15) kind = 'crumble';
+  const p = {x: Math.random()*(W-w), y, w, kind, c: PLAT_COLORS[(Math.random()*PLAT_COLORS.length)|0],
+             vx: kind==='move' ? (0.8+lvl*1.4)*(Math.random()<.5?-1:1) : 0, wob:0, broken:false, fall:0};
   plats.push(p);
-  if(Math.random() < 0.55) stars.push({x: p.x + p.w/2, y: y - 45 - Math.random()*30, got:false, rot:Math.random()*6});
+  const cx = p.x + p.w/2;
+  const ir = Math.random();
+  if(ir < 0.03) items.push({x:cx, y:y-38, type:'rocket'});
+  else if(ir < 0.06) items.push({x:cx, y:y-38, type:'magnet'});
+  else if(ir < 0.08) items.push({x:cx, y:y-38, type:'heart'});
+  else if(ir < 0.58){
+    // ★を1〜3こ、ならべて置く
+    const n = 1 + (Math.random()*3|0);
+    for(let i=0;i<n;i++) stars.push({x: Math.max(20, Math.min(W-20, cx + (i-(n-1)/2)*34)), y: y - 45 - Math.random()*20, rot:Math.random()*6});
+  }
+  // とげとげ
+  if(h > 200 && Math.random() < 0.06 + lvl*0.12){
+    foes.push({x: Math.random()*W, y: y - 55 - Math.random()*20, vx:(0.6+lvl*1.2)*(Math.random()<.5?-1:1), r:17, ph:Math.random()*6, dead:0});
+  }
 }
 
-// --- 入力 ---
-const keys = {}; let touchDir = 0, dragX = null;
-addEventListener('keydown', e=>{ keys[e.key]=true; if(e.key===' '||e.key==='Enter') tap(); });
+// ---------- 入力 ----------
+const keys = {}; let touchDir = 0, dragging = false;
+addEventListener('keydown', e=>{
+  if(keys[e.key]) return; keys[e.key]=true;
+  if(e.key===' '||e.key==='Enter'||e.key==='ArrowUp') tap(null);
+  if(state==='title' && (e.key==='ArrowLeft'||e.key==='ArrowRight')){ ballColor=(ballColor+(e.key==='ArrowLeft'?BALLS.length-1:1))%BALLS.length; saveColor(); }
+});
 addEventListener('keyup', e=>{ keys[e.key]=false; });
-function px(e){ const r = cv.getBoundingClientRect(); return (e.clientX - r.left)/scale; }
-cv.addEventListener('pointerdown', e=>{ tap(); dragX = px(e); touchDir = dragX < W/2 ? -1 : 1; cv.setPointerCapture(e.pointerId); });
-cv.addEventListener('pointermove', e=>{ if(dragX===null) return; const x = px(e); touchDir = x < W/2 ? -1 : 1; dragX = x; });
-const up = ()=>{ dragX = null; touchDir = 0; };
+function pos(e){ const r = cv.getBoundingClientRect(); return {x:(e.clientX - r.left)/scale, y:(e.clientY - r.top)/scale}; }
+cv.addEventListener('pointerdown', e=>{
+  const p = pos(e); tap(p);
+  dragging = true; touchDir = p.x < W/2 ? -1 : 1;
+  try{ cv.setPointerCapture(e.pointerId); }catch(_){}
+});
+cv.addEventListener('pointermove', e=>{ if(dragging) touchDir = pos(e).x < W/2 ? -1 : 1; });
+const up = ()=>{ dragging = false; touchDir = 0; };
 cv.addEventListener('pointerup', up); cv.addEventListener('pointercancel', up);
+function saveColor(){ try{ localStorage.setItem('poyonColor', ballColor); }catch(e){} SE.poyon(); }
 
-function tap(){
-  if(state==='title'){ reset(); state='play'; poyon(true); }
-  else if(state==='over' && t > 40){ state='title'; t = 0; }
-}
-
-function burst(x,y,c,n=10){
-  for(let i=0;i<n;i++){ const a=Math.random()*Math.PI*2, s=1+Math.random()*4;
-    parts.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s-1,life:40,c}); }
-}
-
-// --- 更新 ---
-function update(){
-  t++;
-  if(state!=='play') { parts.forEach(p=>{p.x+=p.vx;p.y+=p.vy;p.vy+=.15;p.life--}); parts=parts.filter(p=>p.life>0); return; }
-  let dir = (keys.ArrowLeft?-1:0) + (keys.ArrowRight?1:0) || touchDir;
-  ball.vx += dir * 0.6; ball.vx *= 0.9;
-  ball.x += ball.vx;
-  if(ball.x < -ball.r) ball.x = W + ball.r; if(ball.x > W + ball.r) ball.x = -ball.r;
-  ball.vy += 0.32; ball.y += ball.vy;
-  ball.sq += (1 - ball.sq) * 0.2;
-
-  for(const p of plats){
-    if(p.kind==='move'){ p.x += p.vx; if(p.x<0||p.x+p.w>W) p.vx*=-1; }
-    p.wob *= 0.88;
-    if(ball.vy > 0 && ball.x > p.x-8 && ball.x < p.x+p.w+8 && ball.y+ball.r > p.y && ball.y+ball.r < p.y+18+ball.vy){
-      ball.y = p.y - ball.r;
-      const big = p.kind==='super';
-      ball.vy = big ? -15.5 : -10.5; ball.sq = 0.6; p.wob = 1;
-      poyon(big); burst(ball.x, p.y, p.c||'#fff', big?16:6);
+function tap(p){
+  if(state==='title'){
+    // いろえらび
+    if(p && p.y > 455 && p.y < 505){
+      const i = Math.round((p.x - (W/2 - 2*56)) / 56);
+      if(i>=0 && i<BALLS.length){ ballColor = i; saveColor(); return; }
+    }
+    reset(); state='play'; SE.big();
+  }
+  else if(state==='play'){
+    // 空中ジャンプ(着地するまで1回)
+    if(ball.air && rocket<=0){
+      ball.air = false; ball.vy = Math.min(ball.vy, -8.5); ball.sq = 0.75;
+      SE.air(); burst(ball.x, ball.y+ball.r, '#ffffff', 8);
     }
   }
+  else if(state==='over' && t > 50){ state='title'; t = 0; }
+}
+
+// ---------- 演出 ----------
+function burst(x,y,c,n=10,sp=4){
+  for(let i=0;i<n;i++){ const a=Math.random()*Math.PI*2, s=1+Math.random()*sp;
+    parts.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s-1,life:40,c}); }
+}
+function pop(x,y,s,c='#ffb703'){ pops.push({x,y,s,c,life:50}); }
+
+// ---------- 更新 ----------
+function update(){
+  t++;
+  parts.forEach(p=>{p.x+=p.vx;p.y+=p.vy;p.vy+=.15;p.life--}); parts=parts.filter(p=>p.life>0);
+  pops.forEach(p=>{p.y-=1;p.life--}); pops=pops.filter(p=>p.life>0);
+  if(shake>0) shake--;
+  if(state!=='play') return;
+
+  // よこ移動
+  const dir = (keys.ArrowLeft?-1:0) + (keys.ArrowRight?1:0) || touchDir;
+  ball.vx += dir * 0.65; ball.vx *= 0.89;
+  ball.x += ball.vx;
+  if(ball.x < -ball.r) ball.x = W + ball.r; if(ball.x > W + ball.r) ball.x = -ball.r;
+
+  // たて移動
+  if(rocket > 0){
+    rocket--; ball.vy = -13; hurtT = Math.max(hurtT, 2);
+    if(t%2===0) parts.push({x:ball.x+(Math.random()-.5)*10, y:ball.y+ball.r, vx:(Math.random()-.5)*2, vy:3, life:25, c:['#ffd400','#ff7a00','#ff3d3d'][t%3]});
+    if(rocket===0) ball.vy = -6;
+  } else ball.vy += 0.32;
+  ball.y += ball.vy;
+  ball.sq += (1 - ball.sq) * 0.2;
+  ball.trail.push({x:ball.x,y:ball.y}); if(ball.trail.length>8) ball.trail.shift();
+  if(hurtT>0) hurtT--;
+
+  // 床
+  for(const p of plats){
+    if(p.kind==='move'){ p.x += p.vx; if(p.x<0||p.x+p.w>W) p.vx*=-1; }
+    if(p.broken){ p.fall += 0.5; p.y += p.fall; continue; }
+    p.wob *= 0.88;
+    if(rocket<=0 && ball.vy > 0 && ball.x > p.x-8 && ball.x < p.x+p.w+8 && ball.y+ball.r > p.y && ball.y+ball.r < p.y+18+ball.vy){
+      ball.y = p.y - ball.r; ball.air = true;
+      const big = p.kind==='super';
+      ball.vy = big ? -15.5 : -10.5; ball.sq = 0.6; p.wob = 1;
+      big ? SE.big() : SE.poyon();
+      burst(ball.x, p.y, p.c||'#fff', big?16:6);
+      if(p.kind==='crumble'){ p.broken = true; SE.crack(); burst(p.x+p.w/2, p.y, '#c98a4b', 14); }
+    }
+  }
+  // ★
+  if(comboT>0 && --comboT===0) combo = 0;
   for(const s of stars){
     s.rot += 0.05;
-    if(!s.got && Math.hypot(s.x-ball.x, s.y-ball.y) < ball.r+16){ s.got = true; score += 5; kira(); burst(s.x,s.y,'#ffd400',14); }
+    if(magnet>0){ const dx=ball.x-s.x, dy=ball.y-s.y, d=Math.hypot(dx,dy); if(d<220){ s.x+=dx/d*7; s.y+=dy/d*7; } }
+    if(!s.got && Math.hypot(s.x-ball.x, s.y-ball.y) < ball.r+16){
+      s.got = true; combo = Math.min(combo+1, 10); comboT = 90;
+      const pt = 5 * Math.min(combo,5); bonus += pt;
+      SE.star(combo); burst(s.x,s.y,'#ffd400',12);
+      pop(s.x, s.y-10, combo>1 ? `+${pt} コンボ${combo}!` : `+${pt}`);
+    }
+  }
+  if(magnet>0) magnet--;
+  // アイテム
+  for(const it of items){
+    if(!it.got && Math.hypot(it.x-ball.x, it.y-ball.y) < ball.r+18){
+      it.got = true; SE.item(); burst(it.x,it.y,'#ffffff',20,5);
+      if(it.type==='rocket'){ rocket = 150; pop(it.x,it.y,'ロケット!','#ff3d3d'); }
+      if(it.type==='magnet'){ magnet = 600; pop(it.x,it.y,'じしゃく!','#4fb3ff'); }
+      if(it.type==='heart'){ if(lives<3){ lives++; pop(it.x,it.y,'ハート +1','#ff5fa2'); } else { bonus+=20; pop(it.x,it.y,'+20','#ff5fa2'); } }
+    }
+  }
+  // とげとげ
+  for(const f of foes){
+    if(f.dead){ f.dead++; f.y += 6; continue; }
+    f.ph += 0.05; f.x += f.vx; if(f.x<f.r||f.x>W-f.r) f.vx*=-1;
+    const fy = f.y + Math.sin(f.ph)*10;
+    if(Math.hypot(f.x-ball.x, fy-ball.y) < f.r + ball.r - 4){
+      if(rocket>0 || (ball.vy > 0 && ball.y < fy - 6)){
+        // ふみつけ!
+        f.dead = 1; bonus += 15; ball.vy = -12; ball.air = true; ball.sq = 0.6;
+        SE.stomp(); burst(f.x,fy,'#a066ff',18); pop(f.x,fy,'ふみつけ! +15','#a066ff');
+      } else if(hurtT<=0){
+        lives--; hurtT = 100; shake = 15; ball.vy = 4; ball.vx = (ball.x<f.x?-6:6); SE.hurt();
+        pop(ball.x, ball.y-30, 'いたっ!','#ff3d3d');
+        if(lives<=0) return gameOver();
+      }
+    }
   }
   // カメラ
   const target = ball.y - H*0.42;
-  if(target < camY){ const d = camY - target; camY = target; score += d/40; }
+  if(target < camY) camY = target;
+  maxH = Math.max(maxH, height());
+  // ステージ
+  const ns = STAGES.reduce((a,s,i)=> height()>=s.h ? i : a, 0);
+  if(ns > stage){ stage = ns; banner = 150; SE.stage(); bonus += 50; }
+  if(banner>0) banner--;
   // 新しい床
   let top = Math.min(...plats.map(p=>p.y));
-  while(top > camY - 150){ top -= 85 + Math.random()*35 + Math.min(40, score/3); addPlat(top); }
-  plats = plats.filter(p => p.y < camY + H + 50);
-  stars = stars.filter(s => s.y < camY + H + 50);
+  while(top > camY - 150){ top -= gap(); addPlat(top); }
+  const lim = camY + H + 60;
+  plats = plats.filter(p => p.y < lim); stars = stars.filter(s => !s.got && s.y < lim);
+  items = items.filter(i => !i.got && i.y < lim); foes = foes.filter(f => f.dead<40 && f.y < lim);
   // 落ちた
   if(ball.y - ball.r > camY + H){
-    lives--; snd(500,120,0.5,'sine',0.3);
-    if(lives <= 0){
-      state='over'; t=0; score = Math.floor(score);
-      if(score > best){ best = score; try{localStorage.setItem('poyonBest',best)}catch(e){} }
-    } else {
-      // たすけの雲で復活
-      const rescue = {x:W/2-70, y:camY+H-90, w:140, kind:'super', c:'#ffffff', vx:0, wob:0};
-      plats.push(rescue); ball.x = W/2; ball.y = camY + H - 200; ball.vy = 2; ball.vx = 0;
-    }
+    lives--; SE.hurt(); shake = 15;
+    if(lives <= 0) return gameOver();
+    plats.push({x:W/2-80, y:camY+H-90, w:160, kind:'super', c:'#ffffff', vx:0, wob:0, broken:false, fall:0});
+    ball.x = W/2; ball.y = camY + H - 200; ball.vy = 2; ball.vx = 0; hurtT = 90;
+    pop(W/2, camY+H-250, 'たすけて〜!','#4fb3ff');
   }
-  parts.forEach(p=>{p.x+=p.vx;p.y+=p.vy;p.vy+=.15;p.life--}); parts=parts.filter(p=>p.life>0);
+}
+function gameOver(){
+  state='over'; t=0;
+  if(score() > best){ best = score(); try{localStorage.setItem('poyonBest',best)}catch(e){} }
 }
 
-// --- 描画 ---
+// ---------- 描画 ----------
 function star(x,y,r,rot,fill){
   ctx.save(); ctx.translate(x,y); ctx.rotate(rot); ctx.beginPath();
   for(let i=0;i<10;i++){ const a=i*Math.PI/5-Math.PI/2, rr=i%2?r*0.45:r; ctx.lineTo(Math.cos(a)*rr, Math.sin(a)*rr); }
   ctx.closePath(); ctx.fillStyle=fill; ctx.fill(); ctx.lineWidth=2; ctx.strokeStyle='#e0a800'; ctx.stroke(); ctx.restore();
 }
-function rr(x,y,w,h,r){ ctx.beginPath(); ctx.roundRect ? ctx.roundRect(x,y,w,h,r) : ctx.rect(x,y,w,h); }
-function drawBall(x,y,r,sq,col){
-  ctx.save(); ctx.translate(x,y+r*(1-sq)*0.5); ctx.scale(1/Math.sqrt(sq)*(sq<1?1:1), sq);
+function rr(x,y,w,h,r){ ctx.beginPath(); if(ctx.roundRect) ctx.roundRect(x,y,w,h,r); else ctx.rect(x,y,w,h); }
+function drawBall(x,y,r,sq,col,face='happy'){
+  ctx.save(); ctx.translate(x,y+r*(1-sq)*0.5); ctx.scale(1/Math.sqrt(sq), sq);
   ctx.beginPath(); ctx.arc(0,0,r,0,Math.PI*2); ctx.fillStyle=col; ctx.fill();
   ctx.beginPath(); ctx.arc(-r*.35,-r*.4,r*.28,0,Math.PI*2); ctx.fillStyle='rgba(255,255,255,.7)'; ctx.fill();
-  // かお
-  ctx.fillStyle='#333'; ctx.beginPath(); ctx.arc(-r*.3,0,r*.11,0,7); ctx.arc(r*.3,0,r*.11,0,7); ctx.fill();
+  ctx.fillStyle='#333';
+  if(face==='hurt'){ ctx.font=`bold ${r*.5}px sans-serif`; ctx.textAlign='center'; ctx.fillText('> <',0,r*.12); }
+  else { ctx.beginPath(); ctx.arc(-r*.3,0,r*.11,0,7); ctx.arc(r*.3,0,r*.11,0,7); ctx.fill(); }
   ctx.fillStyle='rgba(255,120,150,.6)'; ctx.beginPath(); ctx.arc(-r*.55,r*.22,r*.13,0,7); ctx.arc(r*.55,r*.22,r*.13,0,7); ctx.fill();
-  ctx.strokeStyle='#333'; ctx.lineWidth=2; ctx.beginPath(); ctx.arc(0,r*.15,r*.18,0.2,Math.PI-0.2); ctx.stroke();
+  ctx.strokeStyle='#333'; ctx.lineWidth=2; ctx.beginPath();
+  if(face==='hurt') ctx.arc(0,r*.42,r*.14,Math.PI+0.3,-0.3); else ctx.arc(0,r*.15,r*.18,0.2,Math.PI-0.2);
+  ctx.stroke(); ctx.restore();
+}
+function drawFoe(f){
+  const fy = f.y + Math.sin(f.ph)*10;
+  ctx.save(); ctx.translate(f.x, fy); if(f.dead) ctx.rotate(f.dead*0.3);
+  ctx.fillStyle='#7b3fc4'; ctx.beginPath();
+  for(let i=0;i<16;i++){ const a=i*Math.PI/8 + t*0.02, rr=i%2?f.r:f.r+8; ctx.lineTo(Math.cos(a)*rr, Math.sin(a)*rr); }
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle='#a066ff'; ctx.beginPath(); ctx.arc(0,0,f.r,0,7); ctx.fill();
+  ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(-6,-3,5,0,7); ctx.arc(6,-3,5,0,7); ctx.fill();
+  ctx.fillStyle='#222'; ctx.beginPath(); ctx.arc(-5+Math.sign(f.vx)*1.5,-3,2.5,0,7); ctx.arc(7+Math.sign(f.vx)*1.5,-3,2.5,0,7); ctx.fill();
   ctx.restore();
 }
-function text(s,x,y,size,fill='#fff',stroke='#ff5fa2'){
-  ctx.font=`bold ${size}px "Hiragino Maru Gothic ProN","Rounded Mplus 1c",sans-serif`; ctx.textAlign='center';
+function text(s,x,y,size,fill='#fff',stroke='#ff5fa2',align='center'){
+  ctx.font=`bold ${size}px "Hiragino Maru Gothic ProN","Rounded Mplus 1c",sans-serif`; ctx.textAlign=align;
   ctx.lineWidth=size/5; ctx.strokeStyle=stroke; ctx.lineJoin='round'; ctx.strokeText(s,x,y); ctx.fillStyle=fill; ctx.fillText(s,x,y);
 }
+function emoji(s,x,y,size){ ctx.font=`${size}px sans-serif`; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText(s,x,y); ctx.textBaseline='alphabetic'; }
+function lerpColor(a,b,k){
+  const pa=parseInt(a.slice(1),16), pb=parseInt(b.slice(1),16);
+  const c=[16,8,0].map(s=>Math.round(((pa>>s)&255)*(1-k)+((pb>>s)&255)*k));
+  return `rgb(${c[0]},${c[1]},${c[2]})`;
+}
 function bg(){
+  const h = state==='play'||state==='over' ? height() : 0;
+  let i = 0; while(i < STAGES.length-1 && h >= STAGES[i+1].h) i++;
+  const a = STAGES[i], b = STAGES[Math.min(i+1, STAGES.length-1)];
+  const k = b===a ? 0 : Math.max(0, Math.min(1, (h - (b.h-80)) / 80));
   const g = ctx.createLinearGradient(0,0,0,H);
-  const k = Math.min(1, (-camY)/8000);
-  g.addColorStop(0, k>0.5 ? '#3a2a7a' : '#8fd3ff'); g.addColorStop(1, '#ffe9f3');
+  g.addColorStop(0, lerpColor(a.top,b.top,k)); g.addColorStop(1, lerpColor(a.bot,b.bot,k));
   ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+  // よぞら以降はほし
+  if(i>=2){ ctx.fillStyle='rgba(255,255,255,.8)';
+    for(let j=0;j<40;j++){ const x=(j*73)%W, y=((j*131 - camY*0.15)%H+H)%H, s=(j%3)+1;
+      ctx.globalAlpha = 0.4 + 0.6*Math.abs(Math.sin(t*0.03+j)); ctx.fillRect(x,y,s,s); }
+    ctx.globalAlpha=1; }
+  if(i>=3){ // わくせい
+    const y = ((300 - camY*0.08) % (H+300) + H+300) % (H+300) - 150;
+    ctx.fillStyle='#ffb36b'; ctx.beginPath(); ctx.arc(320,y,40,0,7); ctx.fill();
+    ctx.strokeStyle='rgba(255,230,180,.8)'; ctx.lineWidth=5; ctx.beginPath(); ctx.ellipse(320,y,62,14,-0.3,0,7); ctx.stroke(); }
   // 雲
-  ctx.fillStyle='rgba(255,255,255,.7)';
-  for(let i=0;i<6;i++){ const y = ((i*160 - camY*0.3) % (H+100)+H+100)%(H+100)-50, x = (i*97)%W;
+  ctx.fillStyle=a.cloud;
+  for(let j=0;j<6;j++){ const y = ((j*160 - camY*0.3) % (H+100)+H+100)%(H+100)-50, x = (j*97)%W;
     ctx.beginPath(); ctx.arc(x,y,24,0,7); ctx.arc(x+26,y-8,30,0,7); ctx.arc(x+54,y,22,0,7); ctx.fill(); }
 }
 function draw(){
+  ctx.save();
+  if(shake>0) ctx.translate((Math.random()-.5)*shake, (Math.random()-.5)*shake);
   bg();
-  if(state==='title'){
-    text('ぽよんぽよん',W/2,190,46); text('ボール',W/2,250,52);
-    drawBall(W/2, 380 + Math.abs(Math.sin(t*0.07))*-80, 40, 1-Math.max(0,Math.cos(t*0.07*2))*0.0, BALLS[ballColor]);
-    ctx.fillStyle='#ff9ecb'; rr(W/2-70,430,140,22,11); ctx.fill();
-    if((t/30|0)%2===0) text('タッチして スタート!',W/2,530,26,'#fff','#4fb3ff');
-    text('ひだり・みぎ を おして うごかそう',W/2,580,18,'#fff','#888');
-    text('★ を あつめて うえへ のぼろう',W/2,612,18,'#fff','#888');
-    if(best) text('さいこう: '+best,W/2,660,20,'#fff','#ffb703');
-    return;
-  }
+  if(state==='title'){ drawTitle(); ctx.restore(); return; }
   ctx.save(); ctx.translate(0,-camY);
   for(const p of plats){
     const wob = Math.sin(t*0.6)*p.wob*6;
     if(p.kind==='ground'){ ctx.fillStyle='#9be38a'; ctx.fillRect(0,p.y,W,200); continue; }
+    if(p.kind==='crumble'){
+      ctx.globalAlpha = p.broken ? Math.max(0,1-p.fall/10) : 1;
+      ctx.fillStyle='#d9a066'; rr(p.x, p.y, p.w, 16, 6); ctx.fill();
+      ctx.fillStyle='#7a4a24'; for(let i=10;i<p.w-6;i+=18){ ctx.beginPath(); ctx.arc(p.x+i, p.y+8, 2.5,0,7); ctx.fill(); }
+      if(p.broken){ ctx.strokeStyle='#7a4a24'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(p.x+p.w/2,p.y); ctx.lineTo(p.x+p.w/2-5,p.y+8); ctx.lineTo(p.x+p.w/2+4,p.y+16); ctx.stroke(); }
+      ctx.globalAlpha = 1; continue;
+    }
     ctx.fillStyle = p.kind==='super' ? '#ff5fa2' : p.c;
     rr(p.x - wob/2, p.y + p.wob*4, p.w + wob, 16 - p.wob*4, 9); ctx.fill();
     ctx.fillStyle='rgba(255,255,255,.55)'; rr(p.x+8, p.y+3+p.wob*4, p.w*0.4, 4, 2); ctx.fill();
-    if(p.kind==='super'){ ctx.font='bold 14px sans-serif'; ctx.textAlign='center'; ctx.fillStyle='#fff'; ctx.fillText('びよーん',p.x+p.w/2,p.y+13+p.wob*4); }
+    if(p.kind==='super'){ ctx.font='bold 13px sans-serif'; ctx.textAlign='center'; ctx.fillStyle='#fff'; ctx.fillText('びよーん',p.x+p.w/2,p.y+13+p.wob*4); }
+    if(p.kind==='move'){ ctx.fillStyle='rgba(255,255,255,.9)'; ctx.font='bold 12px sans-serif'; ctx.textAlign='center'; ctx.fillText('◀ ▶',p.x+p.w/2,p.y+13); }
   }
-  for(const s of stars) if(!s.got) star(s.x,s.y,15,s.rot,'#ffe14d');
-  for(const p of parts){ ctx.globalAlpha=p.life/40; ctx.fillStyle=p.c; ctx.beginPath(); ctx.arc(p.x,p.y,4,0,7); ctx.fill(); }
+  for(const s of stars) star(s.x,s.y,15,s.rot,'#ffe14d');
+  for(const it of items){
+    const by = it.y + Math.sin(t*0.08 + it.x)*5;
+    ctx.fillStyle='rgba(255,255,255,.6)'; ctx.beginPath(); ctx.arc(it.x,by,20,0,7); ctx.fill();
+    emoji({rocket:'🚀', magnet:'🧲', heart:'💖'}[it.type], it.x, by+1, 24);
+  }
+  for(const f of foes) drawFoe(f);
+  for(const p of parts){ ctx.globalAlpha=Math.max(0,p.life/40); ctx.fillStyle=p.c; ctx.beginPath(); ctx.arc(p.x,p.y,4,0,7); ctx.fill(); }
   ctx.globalAlpha=1;
-  if(state==='play') drawBall(ball.x, ball.y, ball.r, ball.sq, BALLS[ballColor]);
-  ctx.restore();
-  // HUD
-  ctx.textAlign='left'; text(String(Math.floor(score)),W/2,50,40);
-  for(let i=0;i<3;i++){ ctx.font='26px sans-serif'; ctx.textAlign='left'; ctx.fillText(i<lives?'❤️':'🤍',12+i*32,44); }
-  if(state==='over'){
-    ctx.fillStyle='rgba(255,255,255,.75)'; rr(40,220,W-80,260,24); ctx.fill();
-    text('おしまい!',W/2,290,44); text(Math.floor(score)+' てん',W/2,360,40,'#fff','#4fb3ff');
-    text('さいこう: '+best,W/2,410,22,'#fff','#ffb703');
-    if(t>40) text('タッチで もういちど',W/2,455,22,'#fff','#3cc46a');
+  if(state==='play'){
+    // のこりかげ
+    ball.trail.forEach((p,i)=>{ ctx.globalAlpha=i/ball.trail.length*0.25; ctx.fillStyle=BALLS[ballColor]; ctx.beginPath(); ctx.arc(p.x,p.y,ball.r*i/ball.trail.length,0,7); ctx.fill(); });
+    ctx.globalAlpha=1;
+    if(magnet>0){ ctx.strokeStyle=`rgba(79,179,255,${0.3+0.2*Math.sin(t*0.2)})`; ctx.lineWidth=3; ctx.beginPath(); ctx.arc(ball.x,ball.y,ball.r+12+Math.sin(t*0.2)*3,0,7); ctx.stroke(); }
+    if(!(hurtT>0 && rocket<=0 && (t>>2)%2)) drawBall(ball.x, ball.y, ball.r, ball.sq, BALLS[ballColor], hurtT>60&&rocket<=0?'hurt':'happy');
+    if(rocket>0) emoji('🚀', ball.x, ball.y+ball.r+14, 22);
   }
+  for(const p of pops){ ctx.globalAlpha=Math.min(1,p.life/20); text(p.s,p.x,p.y,20,'#fff',p.c); }
+  ctx.globalAlpha=1;
+  ctx.restore();
+
+  // HUD
+  text(String(score()),W/2,50,40);
+  text(Math.floor(maxH)+'m', W/2, 76, 16, '#fff', '#4fb3ff');
+  for(let i=0;i<3;i++) emoji(i<lives?'❤️':'🤍', 24+i*30, 34, 24);
+  if(state==='play'){
+    let ix = W-28;
+    if(rocket>0){ emoji('🚀', ix, 34, 22); ix-=34; }
+    if(magnet>0){ emoji('🧲', ix, 34, 22); ix-=34; }
+    // 空中ジャンプの目じるし
+    ctx.fillStyle = ball.air ? '#ffffff' : 'rgba(255,255,255,.3)';
+    ctx.beginPath(); ctx.arc(24, 64, 8, 0, 7); ctx.fill();
+    text('ぽよん', 38, 70, 13, '#fff', '#888', 'left');
+    if(combo>1 && comboT>0) text(`コンボ ×${combo}`, W/2, 104, 22, '#fff', '#ffb703');
+  }
+  if(banner>0 && state==='play'){
+    const a = Math.min(1, banner/30, (150-banner)/15 + 0.01);
+    ctx.globalAlpha = Math.max(0,a);
+    ctx.fillStyle='rgba(255,255,255,.75)'; rr(30,120,W-60,100,24); ctx.fill();
+    text(stage===0 ? 'スタート!' : `ステージ${stage+1}`, W/2, 162, 26, '#fff', '#4fb3ff');
+    text(STAGES[stage].name + (stage>0?' +50':''), W/2, 204, 32);
+    ctx.globalAlpha=1;
+  }
+  if(state==='over'){
+    ctx.fillStyle='rgba(255,255,255,.8)'; rr(40,200,W-80,300,24); ctx.fill();
+    text('おしまい!',W/2,265,44);
+    text(score()+' てん',W/2,330,40,'#fff','#4fb3ff');
+    text(`${Math.floor(maxH)}m ・ ${STAGES[stage].name} まで`,W/2,370,18,'#fff','#888');
+    text(score()>=best && score()>0 ? 'しんきろく!' : 'さいこう: '+best,W/2,412,24,'#fff','#ffb703');
+    if(t>50 && (t/30|0)%2===0) text('タッチで もういちど',W/2,465,22,'#fff','#3cc46a');
+  }
+  ctx.restore();
+}
+function drawTitle(){
+  text('ぽよんぽよん',W/2,150,46); text('ボール',W/2,210,52);
+  const k = Math.abs(Math.sin(t*0.06));
+  drawBall(W/2, 380 - k*90, 40, k<0.15 ? 0.7+k*2 : 1, BALLS[ballColor]);
+  ctx.fillStyle='#ff9ecb'; rr(W/2-70,422,140,20,10); ctx.fill();
+  text('いろを えらんでね',W/2,452,16,'#fff','#888');
+  BALLS.forEach((c,i)=>{ const x = W/2 + (i-2)*56;
+    if(i===ballColor){ ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(x,480,22,0,7); ctx.fill(); }
+    ctx.fillStyle=c; ctx.beginPath(); ctx.arc(x,480,16,0,7); ctx.fill(); });
+  if((t/30|0)%2===0) text('タッチして スタート!',W/2,550,26,'#fff','#4fb3ff');
+  text('ひだり・みぎ を おして うごかそう',W/2,588,16,'#fff','#888');
+  text('くうちゅうで タッチ → もういちど ぽよん',W/2,612,16,'#fff','#888');
+  text('とげとげは うえから ふんでね',W/2,636,16,'#fff','#888');
+  if(best) text('さいこう: '+best,W/2,676,20,'#fff','#ffb703');
 }
 function loop(){ update(); draw(); requestAnimationFrame(loop); }
-setInterval(()=>{ if(state==='title' && t%120===0) ballColor=(ballColor+1)%BALLS.length; }, 50);
 loop();
 </script>
 </body>
