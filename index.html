@@ -2,12 +2,18 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#ffe9f3">
 <title>ぽよんぽよんボール</title>
 <style>
-  html,body{margin:0;height:100%;overflow:hidden;background:#ffe9f3;touch-action:none;
+  html,body{margin:0;height:100%;overflow:hidden;background:#ffe9f3;touch-action:none;overscroll-behavior:none;
+    position:fixed;inset:0;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent;
     font-family:"Hiragino Maru Gothic ProN","Rounded Mplus 1c",system-ui,sans-serif;user-select:none;-webkit-user-select:none}
-  canvas{display:block;margin:0 auto;touch-action:none}
+  body{display:flex;align-items:center;justify-content:center}
+  canvas{display:block;touch-action:none}
 </style>
 </head>
 <body>
@@ -15,7 +21,8 @@
 <script>
 // ===== ぽよんぽよんボール =====
 // ボールは自動でぽよんと跳ねる。左右に動かしてゼリーの床を登り、★を集めよう。
-// 操作: 画面の左/右を押す(長押しで移動)。押した瞬間に空中でもう1回ぽよん(空中ジャンプ)。キーボードは ← → とスペース。
+// 操作(スマホ): 画面のどこでも指を置くと、ボールが指の横位置へ向かう。ちょんと短くタッチ = 空中でもう1回ぽよん。
+// 操作(PC): ← → とスペース。
 const cv = document.getElementById('c'), ctx = cv.getContext('2d');
 const W = 400, H = 700; let scale = 1;
 function resize(){
@@ -32,6 +39,7 @@ let ac = null;
 function snd(f1, f2, dur, type='sine', vol=0.25, delay=0){
   try{
     if(!ac) ac = new (window.AudioContext||window.webkitAudioContext)();
+    if(ac.state === 'suspended') ac.resume();
     const o = ac.createOscillator(), g = ac.createGain(), t = ac.currentTime + delay;
     o.type = type; o.frequency.setValueAtTime(f1,t); o.frequency.exponentialRampToValueAtTime(f2,t+dur);
     g.gain.setValueAtTime(vol,t); g.gain.exponentialRampToValueAtTime(0.001,t+dur);
@@ -106,7 +114,7 @@ function addPlat(y){
 }
 
 // ---------- 入力 ----------
-const keys = {}; let touchDir = 0, dragging = false;
+const keys = {}; let fingerX = null, downT = 0, downP = null, activeId = null, paused = false;
 addEventListener('keydown', e=>{
   if(keys[e.key]) return; keys[e.key]=true;
   if(e.key===' '||e.key==='Enter'||e.key==='ArrowUp') tap(null);
@@ -114,14 +122,30 @@ addEventListener('keydown', e=>{
 });
 addEventListener('keyup', e=>{ keys[e.key]=false; });
 function pos(e){ const r = cv.getBoundingClientRect(); return {x:(e.clientX - r.left)/scale, y:(e.clientY - r.top)/scale}; }
-cv.addEventListener('pointerdown', e=>{
-  const p = pos(e); tap(p);
-  dragging = true; touchDir = p.x < W/2 ? -1 : 1;
-  try{ cv.setPointerCapture(e.pointerId); }catch(_){}
-});
-cv.addEventListener('pointermove', e=>{ if(dragging) touchDir = pos(e).x < W/2 ? -1 : 1; });
-const up = ()=>{ dragging = false; touchDir = 0; };
-cv.addEventListener('pointerup', up); cv.addEventListener('pointercancel', up);
+// 画面のどこを触ってもOK(キャンバスの外の余白でも)
+addEventListener('pointerdown', e=>{
+  e.preventDefault();
+  const p = pos(e);
+  if(paused){ paused = false; return; }
+  if(state!=='play'){ tap(p); return; }
+  // 2本目の指 = すぐ空中ジャンプ
+  if(activeId!==null && activeId!==e.pointerId){ airJump(); return; }
+  activeId = e.pointerId; fingerX = p.x; downT = performance.now(); downP = p;
+}, {passive:false});
+addEventListener('pointermove', e=>{ if(e.pointerId===activeId) fingerX = pos(e).x; });
+function release(e){
+  if(e.pointerId!==activeId) return;
+  const p = pos(e);
+  // ちょんと短いタッチ = 空中ジャンプ
+  if(downP && performance.now()-downT < 220 && Math.hypot(p.x-downP.x, p.y-downP.y) < 25) airJump();
+  activeId = null; fingerX = null; downP = null;
+}
+addEventListener('pointerup', release); addEventListener('pointercancel', e=>{ if(e.pointerId===activeId){ activeId=null; fingerX=null; downP=null; } });
+// ダブルタップ拡大・長押しメニュー・スクロールを止める
+['touchstart','touchmove','touchend','gesturestart','dblclick','contextmenu'].forEach(ev=>
+  addEventListener(ev, e=>e.preventDefault(), {passive:false}));
+// ほかのアプリに切りかえたら一時停止
+document.addEventListener('visibilitychange', ()=>{ if(document.hidden && state==='play') paused = true; activeId=null; fingerX=null; });
 function saveColor(){ try{ localStorage.setItem('poyonColor', ballColor); }catch(e){} SE.poyon(); }
 
 function tap(p){
@@ -133,14 +157,15 @@ function tap(p){
     }
     reset(); state='play'; SE.big();
   }
-  else if(state==='play'){
-    // 空中ジャンプ(着地するまで1回)
-    if(ball.air && rocket<=0){
-      ball.air = false; ball.vy = Math.min(ball.vy, -8.5); ball.sq = 0.75;
-      SE.air(); burst(ball.x, ball.y+ball.r, '#ffffff', 8);
-    }
-  }
+  else if(state==='play') airJump();
   else if(state==='over' && t > 50){ state='title'; t = 0; }
+}
+// 空中ジャンプ(着地するまで1回)
+function airJump(){
+  if(state==='play' && ball.air && rocket<=0){
+    ball.air = false; ball.vy = Math.min(ball.vy, -8.5); ball.sq = 0.75;
+    SE.air(); burst(ball.x, ball.y+ball.r, '#ffffff', 8);
+  }
 }
 
 // ---------- 演出 ----------
@@ -159,8 +184,12 @@ function update(){
   if(state!=='play') return;
 
   // よこ移動
-  const dir = (keys.ArrowLeft?-1:0) + (keys.ArrowRight?1:0) || touchDir;
-  ball.vx += dir * 0.65; ball.vx *= 0.89;
+  const dir = (keys.ArrowLeft?-1:0) + (keys.ArrowRight?1:0);
+  if(fingerX !== null){
+    // 指の横位置へなめらかに向かう
+    const want = Math.max(-7.5, Math.min(7.5, (fingerX - ball.x) * 0.18));
+    ball.vx += (want - ball.vx) * 0.3;
+  } else { ball.vx += dir * 0.65; ball.vx *= 0.89; }
   ball.x += ball.vx;
   if(ball.x < -ball.r) ball.x = W + ball.r; if(ball.x > W + ball.r) ball.x = -ball.r;
 
@@ -403,13 +432,29 @@ function drawTitle(){
     if(i===ballColor){ ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(x,480,22,0,7); ctx.fill(); }
     ctx.fillStyle=c; ctx.beginPath(); ctx.arc(x,480,16,0,7); ctx.fill(); });
   if((t/30|0)%2===0) text('タッチして スタート!',W/2,550,26,'#fff','#4fb3ff');
-  text('ひだり・みぎ を おして うごかそう',W/2,588,16,'#fff','#888');
-  text('くうちゅうで タッチ → もういちど ぽよん',W/2,612,16,'#fff','#888');
+  text('ゆびを おくと ボールが ついてくるよ',W/2,588,16,'#fff','#888');
+  text('ちょんと タッチ → くうちゅうで もういちど ぽよん',W/2,612,15,'#fff','#888');
   text('とげとげは うえから ふんでね',W/2,636,16,'#fff','#888');
   if(best) text('さいこう: '+best,W/2,676,20,'#fff','#ffb703');
 }
-function loop(){ update(); draw(); requestAnimationFrame(loop); }
-loop();
+// 画面のリフレッシュレート(60/90/120Hz)に関係なく同じ速さで動かす
+let last = performance.now(), acc = 0;
+function loop(now){
+  acc += Math.min(100, now - last); last = now;
+  while(acc >= 1000/60){ if(!paused) update(); acc -= 1000/60; }
+  draw();
+  if(state==='play' && fingerX!==null && !paused){
+    // 指の位置の目じるし
+    ctx.fillStyle='rgba(255,255,255,.55)'; ctx.beginPath(); ctx.arc(fingerX, H-40, 18, 0, 7); ctx.fill();
+    ctx.strokeStyle='rgba(255,95,162,.8)'; ctx.lineWidth=3; ctx.stroke();
+  }
+  if(paused){
+    ctx.fillStyle='rgba(0,0,0,.35)'; ctx.fillRect(0,0,W,H);
+    text('おやすみちゅう',W/2,320,34); text('タッチで つづける',W/2,380,24,'#fff','#4fb3ff');
+  }
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
 </script>
 </body>
 </html>
