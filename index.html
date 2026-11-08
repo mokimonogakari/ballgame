@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>ぽよんぽよんボール</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#ffe9f3;touch-action:none;
+    font-family:"Hiragino Maru Gothic ProN","Rounded Mplus 1c",system-ui,sans-serif;user-select:none;-webkit-user-select:none}
+  canvas{display:block;margin:0 auto;touch-action:none}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+// ===== ぽよんぽよんボール =====
+// ルール: ボールは自動でぽよんと跳ねる。左右にうごかして、ゼリーの床を登りながら ★ を集めよう。
+// 操作: 画面の左/右をタッチ(長押し)・ドラッグ、またはキーボード ← →
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const W = 400, H = 700; let scale = 1;
+function resize(){
+  const s = Math.min(innerWidth / W, innerHeight / H);
+  scale = s; const dpr = devicePixelRatio || 1;
+  cv.style.width = W*s+'px'; cv.style.height = H*s+'px';
+  cv.width = W*s*dpr; cv.height = H*s*dpr;
+  ctx.setTransform(s*dpr,0,0,s*dpr,0,0);
+}
+addEventListener('resize', resize); resize();
+
+// --- 音 ---
+let ac = null;
+function snd(f1, f2, dur, type='sine', vol=0.25){
+  try{
+    if(!ac) ac = new (window.AudioContext||window.webkitAudioContext)();
+    const o = ac.createOscillator(), g = ac.createGain(), t = ac.currentTime;
+    o.type = type; o.frequency.setValueAtTime(f1,t); o.frequency.exponentialRampToValueAtTime(f2,t+dur);
+    g.gain.setValueAtTime(vol,t); g.gain.exponentialRampToValueAtTime(0.001,t+dur);
+    o.connect(g).connect(ac.destination); o.start(t); o.stop(t+dur);
+  }catch(e){}
+}
+const poyon = (big)=> big ? (snd(200,700,0.25), setTimeout(()=>snd(400,1000,0.2),90)) : snd(260,520,0.18);
+const kira = ()=>{ snd(900,1400,0.12,'triangle',0.2); setTimeout(()=>snd(1200,1800,0.15,'triangle',0.2),70); };
+
+// --- 状態 ---
+const COLORS = ['#ff7eb6','#7ed6ff','#ffd36e','#9be38a','#c59bff'];
+const BALLS = ['#ff5fa2','#4fb3ff','#ffb703','#3cc46a','#a066ff'];
+let state = 'title', ball, plats = [], stars = [], parts = [], camY = 0, score, best = +(localStorage.getItem('poyonBest')||0), lives, ballColor = 0, t = 0;
+
+function reset(){
+  ball = {x:W/2, y:H-140, vx:0, vy:-9, r:22, sq:1};
+  plats = []; stars = []; parts = [];
+  camY = 0; score = 0; lives = 3;
+  plats.push({x:0, y:H-60, w:W, kind:'ground'});
+  let y = H-60;
+  while(y > -H) { y -= 85 + Math.random()*35; addPlat(y); }
+}
+function addPlat(y){
+  const lvl = Math.min(1, score/60);
+  const w = 95 - lvl*30 + Math.random()*20;
+  const r = Math.random();
+  const kind = r < 0.12 ? 'super' : (r < 0.12 + lvl*0.25 ? 'move' : 'jelly');
+  const p = {x: Math.random()*(W-w), y, w, kind, c: COLORS[(Math.random()*COLORS.length)|0], vx: kind==='move' ? (1+lvl)*(Math.random()<.5?-1:1) : 0, wob:0};
+  plats.push(p);
+  if(Math.random() < 0.55) stars.push({x: p.x + p.w/2, y: y - 45 - Math.random()*30, got:false, rot:Math.random()*6});
+}
+
+// --- 入力 ---
+const keys = {}; let touchDir = 0, dragX = null;
+addEventListener('keydown', e=>{ keys[e.key]=true; if(e.key===' '||e.key==='Enter') tap(); });
+addEventListener('keyup', e=>{ keys[e.key]=false; });
+function px(e){ const r = cv.getBoundingClientRect(); return (e.clientX - r.left)/scale; }
+cv.addEventListener('pointerdown', e=>{ tap(); dragX = px(e); touchDir = dragX < W/2 ? -1 : 1; cv.setPointerCapture(e.pointerId); });
+cv.addEventListener('pointermove', e=>{ if(dragX===null) return; const x = px(e); touchDir = x < W/2 ? -1 : 1; dragX = x; });
+const up = ()=>{ dragX = null; touchDir = 0; };
+cv.addEventListener('pointerup', up); cv.addEventListener('pointercancel', up);
+
+function tap(){
+  if(state==='title'){ reset(); state='play'; poyon(true); }
+  else if(state==='over' && t > 40){ state='title'; t = 0; }
+}
+
+function burst(x,y,c,n=10){
+  for(let i=0;i<n;i++){ const a=Math.random()*Math.PI*2, s=1+Math.random()*4;
+    parts.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s-1,life:40,c}); }
+}
+
+// --- 更新 ---
+function update(){
+  t++;
+  if(state!=='play') { parts.forEach(p=>{p.x+=p.vx;p.y+=p.vy;p.vy+=.15;p.life--}); parts=parts.filter(p=>p.life>0); return; }
+  let dir = (keys.ArrowLeft?-1:0) + (keys.ArrowRight?1:0) || touchDir;
+  ball.vx += dir * 0.6; ball.vx *= 0.9;
+  ball.x += ball.vx;
+  if(ball.x < -ball.r) ball.x = W + ball.r; if(ball.x > W + ball.r) ball.x = -ball.r;
+  ball.vy += 0.32; ball.y += ball.vy;
+  ball.sq += (1 - ball.sq) * 0.2;
+
+  for(const p of plats){
+    if(p.kind==='move'){ p.x += p.vx; if(p.x<0||p.x+p.w>W) p.vx*=-1; }
+    p.wob *= 0.88;
+    if(ball.vy > 0 && ball.x > p.x-8 && ball.x < p.x+p.w+8 && ball.y+ball.r > p.y && ball.y+ball.r < p.y+18+ball.vy){
+      ball.y = p.y - ball.r;
+      const big = p.kind==='super';
+      ball.vy = big ? -15.5 : -10.5; ball.sq = 0.6; p.wob = 1;
+      poyon(big); burst(ball.x, p.y, p.c||'#fff', big?16:6);
+    }
+  }
+  for(const s of stars){
+    s.rot += 0.05;
+    if(!s.got && Math.hypot(s.x-ball.x, s.y-ball.y) < ball.r+16){ s.got = true; score += 5; kira(); burst(s.x,s.y,'#ffd400',14); }
+  }
+  // カメラ
+  const target = ball.y - H*0.42;
+  if(target < camY){ const d = camY - target; camY = target; score += d/40; }
+  // 新しい床
+  let top = Math.min(...plats.map(p=>p.y));
+  while(top > camY - 150){ top -= 85 + Math.random()*35 + Math.min(40, score/3); addPlat(top); }
+  plats = plats.filter(p => p.y < camY + H + 50);
+  stars = stars.filter(s => s.y < camY + H + 50);
+  // 落ちた
+  if(ball.y - ball.r > camY + H){
+    lives--; snd(500,120,0.5,'sine',0.3);
+    if(lives <= 0){
+      state='over'; t=0; score = Math.floor(score);
+      if(score > best){ best = score; try{localStorage.setItem('poyonBest',best)}catch(e){} }
+    } else {
+      // たすけの雲で復活
+      const rescue = {x:W/2-70, y:camY+H-90, w:140, kind:'super', c:'#ffffff', vx:0, wob:0};
+      plats.push(rescue); ball.x = W/2; ball.y = camY + H - 200; ball.vy = 2; ball.vx = 0;
+    }
+  }
+  parts.forEach(p=>{p.x+=p.vx;p.y+=p.vy;p.vy+=.15;p.life--}); parts=parts.filter(p=>p.life>0);
+}
+
+// --- 描画 ---
+function star(x,y,r,rot,fill){
+  ctx.save(); ctx.translate(x,y); ctx.rotate(rot); ctx.beginPath();
+  for(let i=0;i<10;i++){ const a=i*Math.PI/5-Math.PI/2, rr=i%2?r*0.45:r; ctx.lineTo(Math.cos(a)*rr, Math.sin(a)*rr); }
+  ctx.closePath(); ctx.fillStyle=fill; ctx.fill(); ctx.lineWidth=2; ctx.strokeStyle='#e0a800'; ctx.stroke(); ctx.restore();
+}
+function rr(x,y,w,h,r){ ctx.beginPath(); ctx.roundRect ? ctx.roundRect(x,y,w,h,r) : ctx.rect(x,y,w,h); }
+function drawBall(x,y,r,sq,col){
+  ctx.save(); ctx.translate(x,y+r*(1-sq)*0.5); ctx.scale(1/Math.sqrt(sq)*(sq<1?1:1), sq);
+  ctx.beginPath(); ctx.arc(0,0,r,0,Math.PI*2); ctx.fillStyle=col; ctx.fill();
+  ctx.beginPath(); ctx.arc(-r*.35,-r*.4,r*.28,0,Math.PI*2); ctx.fillStyle='rgba(255,255,255,.7)'; ctx.fill();
+  // かお
+  ctx.fillStyle='#333'; ctx.beginPath(); ctx.arc(-r*.3,0,r*.11,0,7); ctx.arc(r*.3,0,r*.11,0,7); ctx.fill();
+  ctx.fillStyle='rgba(255,120,150,.6)'; ctx.beginPath(); ctx.arc(-r*.55,r*.22,r*.13,0,7); ctx.arc(r*.55,r*.22,r*.13,0,7); ctx.fill();
+  ctx.strokeStyle='#333'; ctx.lineWidth=2; ctx.beginPath(); ctx.arc(0,r*.15,r*.18,0.2,Math.PI-0.2); ctx.stroke();
+  ctx.restore();
+}
+function text(s,x,y,size,fill='#fff',stroke='#ff5fa2'){
+  ctx.font=`bold ${size}px "Hiragino Maru Gothic ProN","Rounded Mplus 1c",sans-serif`; ctx.textAlign='center';
+  ctx.lineWidth=size/5; ctx.strokeStyle=stroke; ctx.lineJoin='round'; ctx.strokeText(s,x,y); ctx.fillStyle=fill; ctx.fillText(s,x,y);
+}
+function bg(){
+  const g = ctx.createLinearGradient(0,0,0,H);
+  const k = Math.min(1, (-camY)/8000);
+  g.addColorStop(0, k>0.5 ? '#3a2a7a' : '#8fd3ff'); g.addColorStop(1, '#ffe9f3');
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+  // 雲
+  ctx.fillStyle='rgba(255,255,255,.7)';
+  for(let i=0;i<6;i++){ const y = ((i*160 - camY*0.3) % (H+100)+H+100)%(H+100)-50, x = (i*97)%W;
+    ctx.beginPath(); ctx.arc(x,y,24,0,7); ctx.arc(x+26,y-8,30,0,7); ctx.arc(x+54,y,22,0,7); ctx.fill(); }
+}
+function draw(){
+  bg();
+  if(state==='title'){
+    text('ぽよんぽよん',W/2,190,46); text('ボール',W/2,250,52);
+    drawBall(W/2, 380 + Math.abs(Math.sin(t*0.07))*-80, 40, 1-Math.max(0,Math.cos(t*0.07*2))*0.0, BALLS[ballColor]);
+    ctx.fillStyle='#ff9ecb'; rr(W/2-70,430,140,22,11); ctx.fill();
+    if((t/30|0)%2===0) text('タッチして スタート!',W/2,530,26,'#fff','#4fb3ff');
+    text('ひだり・みぎ を おして うごかそう',W/2,580,18,'#fff','#888');
+    text('★ を あつめて うえへ のぼろう',W/2,612,18,'#fff','#888');
+    if(best) text('さいこう: '+best,W/2,660,20,'#fff','#ffb703');
+    return;
+  }
+  ctx.save(); ctx.translate(0,-camY);
+  for(const p of plats){
+    const wob = Math.sin(t*0.6)*p.wob*6;
+    if(p.kind==='ground'){ ctx.fillStyle='#9be38a'; ctx.fillRect(0,p.y,W,200); continue; }
+    ctx.fillStyle = p.kind==='super' ? '#ff5fa2' : p.c;
+    rr(p.x - wob/2, p.y + p.wob*4, p.w + wob, 16 - p.wob*4, 9); ctx.fill();
+    ctx.fillStyle='rgba(255,255,255,.55)'; rr(p.x+8, p.y+3+p.wob*4, p.w*0.4, 4, 2); ctx.fill();
+    if(p.kind==='super'){ ctx.font='bold 14px sans-serif'; ctx.textAlign='center'; ctx.fillStyle='#fff'; ctx.fillText('びよーん',p.x+p.w/2,p.y+13+p.wob*4); }
+  }
+  for(const s of stars) if(!s.got) star(s.x,s.y,15,s.rot,'#ffe14d');
+  for(const p of parts){ ctx.globalAlpha=p.life/40; ctx.fillStyle=p.c; ctx.beginPath(); ctx.arc(p.x,p.y,4,0,7); ctx.fill(); }
+  ctx.globalAlpha=1;
+  if(state==='play') drawBall(ball.x, ball.y, ball.r, ball.sq, BALLS[ballColor]);
+  ctx.restore();
+  // HUD
+  ctx.textAlign='left'; text(String(Math.floor(score)),W/2,50,40);
+  for(let i=0;i<3;i++){ ctx.font='26px sans-serif'; ctx.textAlign='left'; ctx.fillText(i<lives?'❤️':'🤍',12+i*32,44); }
+  if(state==='over'){
+    ctx.fillStyle='rgba(255,255,255,.75)'; rr(40,220,W-80,260,24); ctx.fill();
+    text('おしまい!',W/2,290,44); text(Math.floor(score)+' てん',W/2,360,40,'#fff','#4fb3ff');
+    text('さいこう: '+best,W/2,410,22,'#fff','#ffb703');
+    if(t>40) text('タッチで もういちど',W/2,455,22,'#fff','#3cc46a');
+  }
+}
+function loop(){ update(); draw(); requestAnimationFrame(loop); }
+setInterval(()=>{ if(state==='title' && t%120===0) ballColor=(ballColor+1)%BALLS.length; }, 50);
+loop();
+</script>
+</body>
+</html>
